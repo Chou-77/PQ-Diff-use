@@ -327,12 +327,12 @@ class UViT(nn.Module):
     def forward(self, x, conditions, timesteps):
         anchor_view, target_pos = conditions
 
+        # 1. 基礎影像嵌入
         x = torch.cat([anchor_view, x], dim=1)  # batch, 3+1, H, W
         x = self.patch_embed(x)
-
-        # 【新增：動態計算特徵圖的高(H)與寬(W)】
         H = W = int(math.sqrt(x.shape[1]))
 
+        # 2. 準備位置與時間特徵
         target_pos = target_pos + self.masked_embed
         time_token = self.time_embed(timestep_embedding(timesteps, self.embed_dim))
         time_token = time_token.unsqueeze(dim=1)
@@ -340,56 +340,44 @@ class UViT(nn.Module):
         x = x + self.pos_embed
         B, L, D = x.shape
 
-        #x = target_pos + x
+        # ================================================================
+        # 【這就是你要改的地方：Early Fusion 邏輯】
+        # ================================================================
+        # 在進入 Block 之前，先讓影像特徵 (x) 透過 CrossAttention 學習位置關係
 
-        # 這裡原本是 x = target_pos + x，這是錯的 (兩者代表不同意義，不能直接相加)
-        # 把它移除，改在中間層用 CrossAttention 處理
+        # A. 計算距離遮罩 (確保模型專注於邊界附近的特徵)
+        dist_mask = self._get_distance_mask(
+            H=H, W=W,
+            sparse_ratio=self.cross_attn.sparse_ratio,
+            device=x.device
+        )
 
-        # 把時間標籤貼到最前面 (長度變成 L+1)
+        # B. 執行 CrossAttention：讓 target_pos 查詢影像特徵 x
+        # 注意：此時 x 尚未加上 time_token，長度為 L (例如 576)
+        target_features = self.cross_attn(x, target_pos, H=H, W=W, distance_mask=dist_mask)
+
+        # C. 直接融合：將位置特徵加回影像特徵中
+        x = x + target_features
+        # ================================================================
+
+        # 3. 加上時間標籤，準備進入主幹網路
         x = torch.cat((time_token, x), dim=1)
-        # target_pos 不需要加 time_token，因為它只是用來查詢 (Query) 的位置特徵
 
+        # 4. 進入 Blocks (現在每一層 Block 看到的特徵都已經帶有位置資訊了)
         skips = []
         for blk in self.in_blocks:
-            # 【修改：傳入 H 和 W】
             x = blk(x, H=H, W=W)
             skips.append(x)
 
-        # 【新增：在中間層插入邊界權重強化交叉注意力 (BWCA)】
-        # 1. 為了不影響 x 裡面的時間標籤，我們先把 x 的空間特徵分離出來當作參考 (Key, Value)
-        x_spatial = x[:, 1:, :]
-
-        # 2. 計算稀疏化後的長度
-        sparse_L = (H // self.cross_attn.sparse_ratio) * (W // self.cross_attn.sparse_ratio)
-
-        # 3. 取得距離遮罩
-        # 3. 取得距離遮罩 (傳入空間維度與降維比例)
-        dist_mask = self._get_distance_mask(
-            H=H,
-            W=W,
-            sparse_ratio=self.cross_attn.sparse_ratio,
-            device=x.device,
-            threshold=4.0,  # 你可以根據實驗結果調整此參數 (例如 3.0 ~ 8.0)
-            penalty=-10000.0
-        )
-
-        # 4. 讓 target_pos 去跟 x_spatial 做交叉注意力
-        target_features = self.cross_attn(x_spatial, target_pos, H=H, W=W, distance_mask=dist_mask)
-
-        # 5. 將運算結果加回 x 身上 (我們把 target_features 視為對 x_spatial 的特徵補充)
-        #    注意：要跟原本的空間特徵維度對齊
-        x = x + torch.cat([torch.zeros_like(x[:, :1, :]), target_features], dim=1)
-
-        # 繼續進入下一關
         x = self.mid_block(x, H=H, W=W)
 
         for blk in self.out_blocks:
-            # 【修改：傳入 H、W 和 skip】
             x = blk(x, H=H, W=W, skip=skips.pop())
 
+        # 5. 最後輸出處理
         x = self.norm(x)
         x = self.decoder_pred(x)
-        x = x[:, -L:, :]  # 濾除第 0 個位置的 time_token
+        x = x[:, -L:, :]  # 濾除 time_token
         x = unpatchify(x, self.in_chans)
         x = self.final_layer(x)
         return x

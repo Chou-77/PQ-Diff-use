@@ -54,6 +54,3 @@ python3 -m torch.distributed.launch --nproc_per_node=1 \
         --master_port=${MASTER_PORT:-36144} \
         evaluate.py --target_expansion 0.25 0.25 0.25 0.25 --eval_dir ./eval_dir/scenery/1x/ --size 128 \
                 --config flickr192_large
-
-
-
