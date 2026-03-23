@@ -338,29 +338,12 @@ class UViT(nn.Module):
         x = x + self.pos_embed
         B, L, D = x.shape
 
-        # ==========================================
-        # 【Early Fusion 核心修改點】
-        # ==========================================
-        # 1. 取得空間特徵參考 (此時 x 還沒加 time_token)
-        x_spatial = x
-
-        # 2. 取得距離遮罩
-        dist_mask = self._get_distance_mask(
-            H=H, W=W,
-            sparse_ratio=self.cross_attn.sparse_ratio,
-            device=x.device,
-            threshold=4.0,
-            penalty=-10000.0
-        )
-
-        # 3. 透過 CrossAttention 注入位置資訊 (target_pos 查詢影像特徵 x)
-        target_features = self.cross_attn(x_spatial, target_pos, H=H, W=W, distance_mask=dist_mask)
-
-        # 4. 更新 x，讓位置資訊進入後續所有 Block
+        # --- 核心修改：在進入 Block 之前融合位置資訊 ---
+        dist_mask = self._get_distance_mask(H=H, W=W, sparse_ratio=self.cross_attn.sparse_ratio, device=x.device)
+        target_features = self.cross_attn(x, target_pos, H=H, W=W, distance_mask=dist_mask)
         x = x + target_features
-        # ==========================================
+        # --------------------------------------------
 
-        # 加上時間標籤並正式進入主幹 Blocks
         x = torch.cat((time_token, x), dim=1)
 
         skips = []
