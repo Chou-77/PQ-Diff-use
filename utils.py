@@ -108,37 +108,37 @@ class TrainState(object):
             if key != 'step' and val is not None and hasattr(val, 'state_dict'):
                 torch.save(val.state_dict(), os.path.join(path, f'{key}.pth'))
 
-    # def load(self, path):
-    #     logging.info(f'load from {path}')
-    #     self.step = torch.load(os.path.join(path, 'step.pth'))
-    #     for key, val in self.__dict__.items():
-    #         if key != 'step' and val is not None:
-    #             val.load_state_dict(torch.load(os.path.join(path, f'{key}.pth'), map_location='cpu'))
     def load(self, path):
         logging.info(f'load from {path}')
         self.step = torch.load(os.path.join(path, 'step.pth'))
         for key, val in self.__dict__.items():
             if key != 'step' and val is not None:
-
-                # ==========================================
-                # 【模式一】正常接續訓練 (原始設定)
-                # 要用時把下面這行解除註解，並把模式二全部註解掉
-                # ==========================================
-                # val.load_state_dict(torch.load(os.path.join(path, f'{key}.pth'), map_location='cpu'))
-
-                # ==========================================
-                # 【模式二】Finetune 修改過架構的模型 (您目前使用的)
-                # ==========================================
-                if key in ['optimizer', 'lr_scheduler']:
-                    print(f"Finetune 模式: 略過載入 {key} 狀態")
-                    continue
-                print(f"正在載入 {key}...")
-                state_dict = torch.load(os.path.join(path, f'{key}.pth'), map_location='cpu')
-                if isinstance(val, torch.nn.Module):
-                    val.load_state_dict(state_dict, strict=False)
-                else:
-                    val.load_state_dict(state_dict)
-                # ==========================================
+                val.load_state_dict(torch.load(os.path.join(path, f'{key}.pth'), map_location='cpu'))
+    # def load(self, path):
+    #     logging.info(f'load from {path}')
+    #     self.step = torch.load(os.path.join(path, 'step.pth'))
+    #     for key, val in self.__dict__.items():
+    #         if key != 'step' and val is not None:
+    #
+    #             # ==========================================
+    #             # 【模式一】正常接續訓練 (原始設定)
+    #             # 要用時把下面這行解除註解，並把模式二全部註解掉
+    #             # ==========================================
+    #             # val.load_state_dict(torch.load(os.path.join(path, f'{key}.pth'), map_location='cpu'))
+    #
+    #             # ==========================================
+    #             # 【模式二】Finetune 修改過架構的模型 (您目前使用的)
+    #             # ==========================================
+    #             if key in ['optimizer', 'lr_scheduler']:
+    #                 print(f"Finetune 模式: 略過載入 {key} 狀態")
+    #                 continue
+    #             print(f"正在載入 {key}...")
+    #             state_dict = torch.load(os.path.join(path, f'{key}.pth'), map_location='cpu')
+    #             if isinstance(val, torch.nn.Module):
+    #                 val.load_state_dict(state_dict, strict=False)
+    #             else:
+    #                 val.load_state_dict(state_dict)
+    #             # ==========================================
 
     def resume(self, ckpt_root, step=None):
         if not os.path.exists(ckpt_root):

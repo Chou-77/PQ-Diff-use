@@ -29,7 +29,7 @@ def get_config():
 
     config.optimizer = d(
         name='adamw',
-        lr=0.00002,
+        lr=0.0002,
         weight_decay=0.03,
         betas=(0.99, 0.99),
     )

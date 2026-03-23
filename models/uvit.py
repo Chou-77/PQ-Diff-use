@@ -161,8 +161,8 @@ class CrossAttention(nn.Module):
         # 強制讓這個全新的注意力機制在剛開始訓練時輸出為 0
         # 避免隨機初始化的雜訊破壞原本 8 萬步的預訓練權重
         # ==========================================
-        nn.init.zeros_(self.proj.weight)
-        nn.init.zeros_(self.proj.bias)
+        # nn.init.zeros_(self.proj.weight)
+        # nn.init.zeros_(self.proj.bias)
 
     def forward(self, x, y, H, W, distance_mask=None):
         B, L, C = x.shape
