@@ -51,7 +51,9 @@ def get_config():
         qkv_bias=False,
         mlp_time_embed=False,
         num_classes=6001,
-        use_checkpoint=True
+        use_checkpoint=True,
+        window_size=6,  # 必須能整除 (img_size / patch_size) = 12，可選 4 或 6
+        sparse_ratio=2  # 必須能整除 (img_size / patch_size) = 12，可選 2 或 3 或 4
     )
 
     config.dataset = d(
