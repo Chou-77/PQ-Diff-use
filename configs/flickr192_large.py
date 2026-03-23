@@ -19,17 +19,17 @@ def get_config():
     )
 
     config.train = d(
-        n_steps=80000,
+        n_steps=100000,
         batch_size=16,
         mode='cond',
         log_interval=10,
         eval_interval=5000,
-        save_interval=10000,
+        save_interval=5000,
     )
 
     config.optimizer = d(
         name='adamw',
-        lr=0.0002,
+        lr=0.00002,
         weight_decay=0.03,
         betas=(0.99, 0.99),
     )

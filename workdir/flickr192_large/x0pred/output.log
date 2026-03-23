@@ -16094,3 +16094,130 @@ z_shape: !!python/tuple
 2026-03-23 05:03:27,054 - train_ldm.py - Save and eval checkpoint 80000...
 2026-03-23 05:03:30,636 - train_ldm.py - 開始自動評估第 80000 步的模型碼...
 2026-03-23 05:09:58,457 - train_ldm.py - Finish fitting, step=80000
+2026-03-23 21:40:59,794 - train_ldm.py - autoencoder:
+  pretrained_path: assets/autoencoder_kl.pth
+ckpt_root: workdir/flickr192_large/x0pred/ckpts
+config_name: flickr192_large
+dataset:
+  embed_dim: 1024
+  grid_size: 12
+  name: flickr
+  path: "/home/lab722-3090/\u4E0B\u8F09/EasyOutPainter-main/dataset/scenery_small/train/images/"
+  resolution: 192
+hparams: x0pred
+lr_scheduler:
+  name: customized
+  warmup_steps: 5000
+mixed_precision: bf16
+nnet:
+  depth: 20
+  embed_dim: 1024
+  img_size: 24
+  in_chans: 4
+  mlp_ratio: 4
+  mlp_time_embed: false
+  name: uvit
+  num_classes: 6001
+  num_heads: 16
+  patch_size: 2
+  qkv_bias: false
+  sparse_ratio: 2
+  use_checkpoint: true
+  window_size: 6
+optimizer:
+  betas: !!python/tuple
+  - 0.99
+  - 0.99
+  lr: 2.0e-05
+  name: adamw
+  weight_decay: 0.03
+pred: noise_pred
+sample:
+  algorithm: dpm_solver
+  cfg: true
+  mini_batch_size: 50
+  n_samples: 50000
+  path: ''
+  sample_steps: 50
+  scale: 0.4
+sample_dir: workdir/flickr192_large/x0pred/samples
+seed: 1234
+train:
+  batch_size: 16
+  eval_interval: 5000
+  log_interval: 10
+  mode: cond
+  n_steps: 100000
+  save_interval: 5000
+workdir: workdir/flickr192_large/x0pred
+z_shape: !!python/tuple
+- 4
+- 24
+- 24
+
+2026-03-23 21:40:59,799 - train_ldm.py - Run on 1 devices
+2026-03-23 21:45:17,322 - train_ldm.py - autoencoder:
+  pretrained_path: assets/autoencoder_kl.pth
+ckpt_root: workdir/flickr192_large/x0pred/ckpts
+config_name: flickr192_large
+dataset:
+  embed_dim: 1024
+  grid_size: 12
+  name: flickr
+  path: "/home/lab722-3090/\u4E0B\u8F09/EasyOutPainter-main/dataset/scenery_small/train/images/"
+  resolution: 192
+hparams: x0pred
+lr_scheduler:
+  name: customized
+  warmup_steps: 5000
+mixed_precision: bf16
+nnet:
+  depth: 20
+  embed_dim: 1024
+  img_size: 24
+  in_chans: 4
+  mlp_ratio: 4
+  mlp_time_embed: false
+  name: uvit
+  num_classes: 6001
+  num_heads: 16
+  patch_size: 2
+  qkv_bias: false
+  sparse_ratio: 2
+  use_checkpoint: true
+  window_size: 6
+optimizer:
+  betas: !!python/tuple
+  - 0.99
+  - 0.99
+  lr: 2.0e-05
+  name: adamw
+  weight_decay: 0.03
+pred: noise_pred
+sample:
+  algorithm: dpm_solver
+  cfg: true
+  mini_batch_size: 50
+  n_samples: 50000
+  path: ''
+  sample_steps: 50
+  scale: 0.4
+sample_dir: workdir/flickr192_large/x0pred/samples
+seed: 1234
+train:
+  batch_size: 16
+  eval_interval: 5000
+  log_interval: 10
+  mode: cond
+  n_steps: 100000
+  save_interval: 5000
+workdir: workdir/flickr192_large/x0pred
+z_shape: !!python/tuple
+- 4
+- 24
+- 24
+
+2026-03-23 21:45:17,334 - train_ldm.py - Run on 1 devices
+2026-03-23 21:46:04,010 - utils.py - nnet has 294029476 parameters
+2026-03-23 21:46:04,958 - utils.py - resume from workdir/flickr192_large/x0pred/ckpts/80000.ckpt
+2026-03-23 21:46:04,959 - utils.py - load from workdir/flickr192_large/x0pred/ckpts/80000.ckpt
