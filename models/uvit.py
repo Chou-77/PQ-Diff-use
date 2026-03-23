@@ -327,12 +327,10 @@ class UViT(nn.Module):
     def forward(self, x, conditions, timesteps):
         anchor_view, target_pos = conditions
 
-        # 1. 基礎影像嵌入
         x = torch.cat([anchor_view, x], dim=1)  # batch, 3+1, H, W
         x = self.patch_embed(x)
         H = W = int(math.sqrt(x.shape[1]))
 
-        # 2. 準備位置與時間特徵
         target_pos = target_pos + self.masked_embed
         time_token = self.time_embed(timestep_embedding(timesteps, self.embed_dim))
         time_token = time_token.unsqueeze(dim=1)
@@ -340,30 +338,31 @@ class UViT(nn.Module):
         x = x + self.pos_embed
         B, L, D = x.shape
 
-        # ================================================================
-        # 【這就是你要改的地方：Early Fusion 邏輯】
-        # ================================================================
-        # 在進入 Block 之前，先讓影像特徵 (x) 透過 CrossAttention 學習位置關係
+        # ==========================================
+        # 【Early Fusion 核心修改點】
+        # ==========================================
+        # 1. 取得空間特徵參考 (此時 x 還沒加 time_token)
+        x_spatial = x
 
-        # A. 計算距離遮罩 (確保模型專注於邊界附近的特徵)
+        # 2. 取得距離遮罩
         dist_mask = self._get_distance_mask(
             H=H, W=W,
             sparse_ratio=self.cross_attn.sparse_ratio,
-            device=x.device
+            device=x.device,
+            threshold=4.0,
+            penalty=-10000.0
         )
 
-        # B. 執行 CrossAttention：讓 target_pos 查詢影像特徵 x
-        # 注意：此時 x 尚未加上 time_token，長度為 L (例如 576)
-        target_features = self.cross_attn(x, target_pos, H=H, W=W, distance_mask=dist_mask)
+        # 3. 透過 CrossAttention 注入位置資訊 (target_pos 查詢影像特徵 x)
+        target_features = self.cross_attn(x_spatial, target_pos, H=H, W=W, distance_mask=dist_mask)
 
-        # C. 直接融合：將位置特徵加回影像特徵中
+        # 4. 更新 x，讓位置資訊進入後續所有 Block
         x = x + target_features
-        # ================================================================
+        # ==========================================
 
-        # 3. 加上時間標籤，準備進入主幹網路
+        # 加上時間標籤並正式進入主幹 Blocks
         x = torch.cat((time_token, x), dim=1)
 
-        # 4. 進入 Blocks (現在每一層 Block 看到的特徵都已經帶有位置資訊了)
         skips = []
         for blk in self.in_blocks:
             x = blk(x, H=H, W=W)
@@ -374,7 +373,6 @@ class UViT(nn.Module):
         for blk in self.out_blocks:
             x = blk(x, H=H, W=W, skip=skips.pop())
 
-        # 5. 最後輸出處理
         x = self.norm(x)
         x = self.decoder_pred(x)
         x = x[:, -L:, :]  # 濾除 time_token
