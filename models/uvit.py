@@ -80,43 +80,61 @@ class Shift(nn.Module):
 
 
 class Attention(nn.Module):
-    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., window_size=8):
+    def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0.):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // num_heads
         self.scale = qk_scale or head_dim ** -0.5
-        self.window_size = window_size  # 引入局部視窗大小
 
         self.qkv = nn.Linear(dim, dim * 3, bias=qkv_bias)
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x, H, W):
-        B, L, C = x.shape
-
-        # 1. 空間重塑與視窗切割 (Local Window Partition)
-        x_2d = x.view(B, H, W, C)
-        x_win = window_partition(x_2d, self.window_size)
-        x_win = x_win.view(-1, self.window_size * self.window_size, C)  # Shape: (B*num_windows, window_area, C)
-
-        # 2. 僅在視窗內部計算注意力 (大幅降低複雜度)
-        qkv = self.qkv(x_win)
-        qkv = einops.rearrange(qkv, 'B L (K H D) -> K B H L D', K=3, H=self.num_heads)
+    def forward(self, x):
+        # 恢復標準的全域注意力，不切 Window，也不管 H, W
+        B, N, C = x.shape
+        qkv = self.qkv(x).reshape(B, N, 3, self.num_heads, C // self.num_heads).permute(2, 0, 3, 1, 4)
         q, k, v = qkv[0], qkv[1], qkv[2]
+
         attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = attn.softmax(dim=-1)
         attn = self.attn_drop(attn)
-        x_win_out = (attn @ v).transpose(1, 2).reshape(-1, self.window_size * self.window_size, C)
 
-        # 3. 視窗還原
-        x_2d_recon = window_reverse(x_win_out.view(-1, self.window_size, self.window_size, C), self.window_size, H, W)
-        x = x_2d_recon.view(B, L, C)
-
+        x = (attn @ v).transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
 
+
+class Block(nn.Module):
+    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None,
+                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, skip=False, use_checkpoint=False,
+                 window_size=None):  # 保留 window_size 參數但不使用，以免報錯
+        super().__init__()
+        self.norm1 = norm_layer(dim)
+        self.attn = Attention(
+            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale)
+        self.norm2 = norm_layer(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer)
+        self.skip_linear = nn.Linear(2 * dim, dim) if skip else None
+        self.use_checkpoint = use_checkpoint
+
+    def forward(self, x, H=None, W=None, skip=None):
+        if self.use_checkpoint:
+            return torch.utils.checkpoint.checkpoint(self._forward, x, skip)
+        else:
+            return self._forward(x, skip)
+
+    def _forward(self, x, skip=None):
+        if self.skip_linear is not None:
+            x = self.skip_linear(torch.cat([x, skip], dim=-1))
+
+        # 恢復原始邏輯：time_token 必須與空間 token 一起進入注意力層運算！
+        x = x + self.attn(self.norm1(x))
+        x = x + self.mlp(self.norm2(x))
+        return x
 
 # --- 修改 2：加入距離遮罩與稀疏採樣的 CrossAttention (方法一與二) ---
 class CrossAttention(nn.Module):
@@ -137,6 +155,14 @@ class CrossAttention(nn.Module):
         self.attn_drop = nn.Dropout(attn_drop)
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
+
+        # ==========================================
+        # 【加入這兩行：零初始化技巧】
+        # 強制讓這個全新的注意力機制在剛開始訓練時輸出為 0
+        # 避免隨機初始化的雜訊破壞原本 8 萬步的預訓練權重
+        # ==========================================
+        nn.init.zeros_(self.proj.weight)
+        nn.init.zeros_(self.proj.bias)
 
     def forward(self, x, y, H, W, distance_mask=None):
         B, L, C = x.shape
@@ -171,50 +197,6 @@ class CrossAttention(nn.Module):
         out = self.proj_drop(out)
         return out
 
-
-class Block(nn.Module):
-    def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None,
-                 act_layer=nn.GELU, norm_layer=nn.LayerNorm, skip=False, use_checkpoint=False,
-                 window_size=6):
-        super().__init__()
-        self.norm1 = norm_layer(dim)
-        # 這裡的 Attention 已經是我們改好的 Window Attention
-        self.attn = Attention(
-            dim, num_heads=num_heads, qkv_bias=qkv_bias, qk_scale=qk_scale,window_size=window_size)
-        self.norm2 = norm_layer(dim)
-        mlp_hidden_dim = int(dim * mlp_ratio)
-        self.mlp = Mlp(in_features=dim, hidden_features=mlp_hidden_dim, act_layer=act_layer)
-        self.skip_linear = nn.Linear(2 * dim, dim) if skip else None
-        self.use_checkpoint = use_checkpoint
-
-    # 修改：接收 H 和 W
-    def forward(self, x, H=None, W=None, skip=None):
-        if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(self._forward, x, H, W, skip)
-        else:
-            return self._forward(x, H, W, skip)
-
-    # 修改：核心運算邏輯
-    def _forward(self, x, H, W, skip=None):
-        if self.skip_linear is not None:
-            x = self.skip_linear(torch.cat([x, skip], dim=-1))
-
-        # 【關鍵修改：分離時間標籤】
-        # 因為 x 的第一個元素是時間標籤 (time_token)，剩下的才是圖片 (spatial_tokens)
-        # 如果不分開，圖片會因為多一個元素而無法排成 H * W 的正方形
-        norm_x = self.norm1(x)
-        time_token = norm_x[:, :1, :]  # 拿出第 0 個 token
-        spatial_tokens = norm_x[:, 1:, :]  # 拿出第 1 個到最後的 token (真正的圖片)
-
-        # 只對圖片部分做視窗注意力運算
-        spatial_attn = self.attn(spatial_tokens, H, W)
-
-        # 算完之後，把時間標籤原封不動地跟圖片拼回去
-        attn_out = torch.cat([torch.zeros_like(time_token), spatial_attn], dim=1)
-
-        x = x + attn_out
-        x = x + self.mlp(self.norm2(x))
-        return x
 
 
 class UViT(nn.Module):
@@ -357,6 +339,8 @@ class UViT(nn.Module):
 
         x = x + self.pos_embed
         B, L, D = x.shape
+
+        #x = target_pos + x
 
         # 這裡原本是 x = target_pos + x，這是錯的 (兩者代表不同意義，不能直接相加)
         # 把它移除，改在中間層用 CrossAttention 處理
