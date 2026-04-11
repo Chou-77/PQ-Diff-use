@@ -19,7 +19,7 @@ def get_config():
     )
 
     config.train = d(
-        n_steps=100000,
+        n_steps=80000,
         batch_size=16,
         mode='cond',
         log_interval=10,
@@ -52,8 +52,6 @@ def get_config():
         mlp_time_embed=False,
         num_classes=6001,
         use_checkpoint=True,
-        window_size=6,  # 必須能整除 (img_size / patch_size) = 12，可選 4 或 6
-        sparse_ratio=2  # 必須能整除 (img_size / patch_size) = 12，可選 2 或 3 或 4
     )
 
     config.dataset = d(
