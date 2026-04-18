@@ -386,58 +386,58 @@ class Building(DatasetFactory):
     def label_prob(self, k):
         return self.frac[k]
 
-class ImageDataset(Dataset):
-    def __init__(
-        self,
-        resolution,
-        image_paths,
-        labels,
-        embed_dim,
-        grid_size,
-        anchor_crop_scale=(0.15, 0.40),
-        target_crop_scale=(0.8, 1.0)
-    ):
-        super().__init__()
-        self.resolution = resolution
-        self.image_paths = []
-        for i in range(len(image_paths)):
-            try:
-                pil_image = Image.open(image_paths[i])
-                pil_image.load()
-                self.image_paths.append(image_paths[i])
-            except:
-                pass
-        self.labels = labels
-        self.embed_dim = embed_dim
-        self.grid_size = grid_size
-        self.anchor_rcr = RandomResizedCropCoord(resolution, scale=anchor_crop_scale, interpolation=transforms.InterpolationMode.BILINEAR)
-        self.target_rcr = RandomResizedCropCoord(resolution, scale=target_crop_scale, interpolation=transforms.InterpolationMode.BILINEAR)
-
-    def __len__(self):
-        return len(self.image_paths)
-
-    def calculate_sin_cos(self, lpos, gpos):
-        kg = gpos[3] / self.grid_size
-        w_bias = (lpos[1] - gpos[1]) / kg
-        kl = lpos[3] / self.grid_size
-        w_scale = kl / kg
-        kg = gpos[2] / self.grid_size
-        h_bias = (lpos[0] - gpos[0]) / kg
-        kl = lpos[2] / self.grid_size
-        h_scale = kl / kg
-        return get_2d_local_sincos_pos_embed(self.embed_dim, self.grid_size, w_bias, w_scale, h_bias, h_scale)
-
-    def __getitem__(self, idx):
-        path = self.image_paths[idx]
-        pil_image = Image.open(path)
-        pil_image.load()
-        pil_image = pil_image.convert("RGB")
-        anchor_pos, anchor_img = self.anchor_rcr(pil_image)
-        target_pos, target_img = self.target_rcr(pil_image)
-        target_pos = self.calculate_sin_cos(target_pos, anchor_pos)
-        anchor_img = np.array(anchor_img) / 127.5 - 1
-        target_img = np.array(target_img) / 127.5 - 1
-        return np.transpose(target_img, [2,0,1]), np.transpose(anchor_img, [2,0,1]), target_pos
+# class ImageDataset(Dataset):
+#     def __init__(
+#         self,
+#         resolution,
+#         image_paths,
+#         labels,
+#         embed_dim,
+#         grid_size,
+#         anchor_crop_scale=(0.15, 0.40),
+#         target_crop_scale=(0.8, 1.0)
+#     ):
+#         super().__init__()
+#         self.resolution = resolution
+#         self.image_paths = []
+#         for i in range(len(image_paths)):
+#             try:
+#                 pil_image = Image.open(image_paths[i])
+#                 pil_image.load()
+#                 self.image_paths.append(image_paths[i])
+#             except:
+#                 pass
+#         self.labels = labels
+#         self.embed_dim = embed_dim
+#         self.grid_size = grid_size
+#         self.anchor_rcr = RandomResizedCropCoord(resolution, scale=anchor_crop_scale, interpolation=transforms.InterpolationMode.BILINEAR)
+#         self.target_rcr = RandomResizedCropCoord(resolution, scale=target_crop_scale, interpolation=transforms.InterpolationMode.BILINEAR)
+#
+#     def __len__(self):
+#         return len(self.image_paths)
+#
+#     def calculate_sin_cos(self, lpos, gpos):
+#         kg = gpos[3] / self.grid_size
+#         w_bias = (lpos[1] - gpos[1]) / kg
+#         kl = lpos[3] / self.grid_size
+#         w_scale = kl / kg
+#         kg = gpos[2] / self.grid_size
+#         h_bias = (lpos[0] - gpos[0]) / kg
+#         kl = lpos[2] / self.grid_size
+#         h_scale = kl / kg
+#         return get_2d_local_sincos_pos_embed(self.embed_dim, self.grid_size, w_bias, w_scale, h_bias, h_scale)
+#
+#     def __getitem__(self, idx):
+#         path = self.image_paths[idx]
+#         pil_image = Image.open(path)
+#         pil_image.load()
+#         pil_image = pil_image.convert("RGB")
+#         anchor_pos, anchor_img = self.anchor_rcr(pil_image)
+#         target_pos, target_img = self.target_rcr(pil_image)
+#         target_pos = self.calculate_sin_cos(target_pos, anchor_pos)
+#         anchor_img = np.array(anchor_img) / 127.5 - 1
+#         target_img = np.array(target_img) / 127.5 - 1
+#         return np.transpose(target_img, [2,0,1]), np.transpose(anchor_img, [2,0,1]), target_pos
 
 
 def center_crop_arr(pil_image, image_size):
