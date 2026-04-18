@@ -100,19 +100,25 @@ def train(config):
                 # === 【重要新增】：特徵蒸餾 (Feature Distillation) 的 50% 課程學習策略 ===
                 # =========================================================================
                 if train_state.step <= config.train.n_steps // 2:
-                    # 呼叫 UViT 的 forward_feature_loss 來計算 L2 Loss
-                    # (使用 nnet.module 是因為模型被 accelerator 打包成了 DDP)
-                    # l_feat = nnet.module.forward_feature_loss(encode_anchor, prime_targe_pos, encode_target)
-                    l_feat = accelerator.unwrap_model(nnet).forward_feature_loss(encode_anchor, prime_targe_pos, encode_target)
+                    # 取得 Batch 中每張圖各自的特徵 Loss (形狀為 [B])
+                    l_feat_batch = accelerator.unwrap_model(nnet).forward_feature_loss(encode_anchor, prime_targe_pos,
+                                                                                       encode_target)
 
-                    # 計算 Cosine 衰減權重 (在第 0 步為 1.0，在第 n_steps // 2 步降為 0)
+                    # 【關鍵防禦】：偵測哪些圖是「非空白」的正常圖片 (排除 CFG dropout 的干擾)
+                    # 判斷方式：如果一張圖的絕對值總和極小 (< 1e-4)，代表它是被捨棄的空白圖
+                    is_active = (prime_anchor_view.abs().view(prime_anchor_view.shape[0], -1).sum(dim=1) > 1e-4)
+
                     decay_weight = math.cos(train_state.step / config.train.n_steps * math.pi)
 
-                    # 結合到總 Loss 裡 (您可以透過前面的係數如 1.0 來調整特徵蒸餾的強度)
-                    loss = loss + 1.0 * l_feat * decay_weight
+                    # 只計算那些「正常圖片」的特徵蒸餾 Loss，並把權重降為 0.5 避免喧賓奪主
+                    if is_active.sum() > 0:
+                        valid_l_feat = l_feat_batch[is_active].mean()
+                        loss = loss + 0.5 * valid_l_feat * decay_weight
 
-                    # 記錄到 wandb 讓您看得到 Loss 逐漸下降
-                    _metrics['l_feat'] = accelerator.gather(l_feat.detach()).mean()
+                        # 記錄到 wandb
+                        _metrics['l_feat'] = accelerator.gather(valid_l_feat.detach()).mean()
+                    else:
+                        _metrics['l_feat'] = torch.tensor(0.0, device=device)
                 # =========================================================================
 
             else:

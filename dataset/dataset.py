@@ -102,44 +102,153 @@ class DatasetFactory(object):
     def label_prob(self, k):
         raise NotImplementedError
 
-class ImageNet(DatasetFactory):
-    def __init__(self, path, resolution, embed_dim, grid_size):
+# class ImageNet(DatasetFactory):
+#     def __init__(self, path, resolution, embed_dim, grid_size):
+#         super().__init__()
+#
+#         print(f'Counting ImageNet files from {path}')
+#         train_files = _list_image_files_recursively(os.path.join(path, 'train'))
+#         class_names = [os.path.basename(path).split("_")[0] for path in train_files]
+#         sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
+#         train_labels = [sorted_classes[x] for x in class_names]
+#         print('Finish counting ImageNet files')
+#
+#         self.train = ImageDataset(resolution, train_files, train_labels, embed_dim, grid_size)
+#         self.resolution = resolution
+#         if len(self.train) != 1_281_167:
+#             print(f'Missing train samples: {len(self.train)} < 1281167')
+#
+#         self.K = max(self.train.labels) + 1
+#         cnt = dict(zip(*np.unique(self.train.labels, return_counts=True)))
+#         self.cnt = torch.tensor([cnt[k] for k in range(self.K)]).float()
+#         self.frac = [self.cnt[k] / len(self.train.labels) for k in range(self.K)]
+#         print(f'{self.K} classes')
+#         print(f'cnt[:10]: {self.cnt[:10]}')
+#         print(f'frac[:10]: {self.frac[:10]}')
+#
+#     @property
+#     def data_shape(self):
+#         return 3, self.resolution, self.resolution
+#
+#     @property
+#     def fid_stat(self):
+#         return f'assets/fid_stats/fid_stats_imagenet{self.resolution}_guided_diffusion.npz'
+#
+#     def sample_label(self, n_samples, device):
+#         return torch.multinomial(self.cnt, n_samples, replacement=True).to(device)
+#
+#     def label_prob(self, k):
+#         return self.frac[k]
+class ImageDataset(Dataset):
+    def __init__(
+            self,
+            resolution,
+            image_paths,
+            labels,
+            embed_dim,
+            grid_size,
+            anchor_crop_scale=(0.15, 0.40),
+            target_crop_scale=(0.8, 1.0)
+    ):
         super().__init__()
-
-        print(f'Counting ImageNet files from {path}')
-        train_files = _list_image_files_recursively(os.path.join(path, 'train'))
-        class_names = [os.path.basename(path).split("_")[0] for path in train_files]
-        sorted_classes = {x: i for i, x in enumerate(sorted(set(class_names)))}
-        train_labels = [sorted_classes[x] for x in class_names]
-        print('Finish counting ImageNet files')
-
-        self.train = ImageDataset(resolution, train_files, train_labels, embed_dim, grid_size)
         self.resolution = resolution
-        if len(self.train) != 1_281_167:
-            print(f'Missing train samples: {len(self.train)} < 1281167')
+        self.image_paths = []
+        self.depth_paths = []  # 【新增】：存放對應的深度圖路徑
 
-        self.K = max(self.train.labels) + 1
-        cnt = dict(zip(*np.unique(self.train.labels, return_counts=True)))
-        self.cnt = torch.tensor([cnt[k] for k in range(self.K)]).float()
-        self.frac = [self.cnt[k] / len(self.train.labels) for k in range(self.K)]
-        print(f'{self.K} classes')
-        print(f'cnt[:10]: {self.cnt[:10]}')
-        print(f'frac[:10]: {self.frac[:10]}')
+        # =========================================================
+        # 【重要路徑設定】
+        # 假設你的原始彩色圖放在包含 'rgb_images' 名稱的資料夾
+        # 深度圖放在包含 'depth_maps' 名稱的資料夾
+        # 如果你的資料夾名稱不同，請修改以下兩個變數：
+        # =========================================================
+        rgb_folder = 'rgb_images'
+        depth_folder = 'depth_maps'
 
-    @property
-    def data_shape(self):
-        return 3, self.resolution, self.resolution
+        for i in range(len(image_paths)):
+            rgb_path = image_paths[i]
 
-    @property
-    def fid_stat(self):
-        return f'assets/fid_stats/fid_stats_imagenet{self.resolution}_guided_diffusion.npz'
+            # 防呆機制：避免遞迴讀取時，把 depth_maps 裡的圖當成 RGB 讀進來
+            if depth_folder in rgb_path:
+                continue
 
-    def sample_label(self, n_samples, device):
-        return torch.multinomial(self.cnt, n_samples, replacement=True).to(device)
+            try:
+                pil_image = Image.open(rgb_path)
+                pil_image.load()
 
-    def label_prob(self, k):
-        return self.frac[k]
+                # 推導對應的深度圖路徑 (強制副檔名為 .png，對應之前的萃取腳本)
+                depth_path = rgb_path.replace(rgb_folder, depth_folder)
+                depth_path = depth_path.rsplit('.', 1)[0] + '.png'
 
+                # 只有當「RGB 和 Depth 都存在」時，才加入訓練清單
+                if os.path.exists(depth_path):
+                    self.image_paths.append(rgb_path)
+                    self.depth_paths.append(depth_path)
+            except:
+                pass
+
+        self.labels = labels
+        self.embed_dim = embed_dim
+        self.grid_size = grid_size
+        self.anchor_rcr = RandomResizedCropCoord(resolution, scale=anchor_crop_scale,
+                                                 interpolation=transforms.InterpolationMode.BILINEAR)
+        self.target_rcr = RandomResizedCropCoord(resolution, scale=target_crop_scale,
+                                                 interpolation=transforms.InterpolationMode.BILINEAR)
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def calculate_sin_cos(self, lpos, gpos):
+        kg = gpos[3] / self.grid_size
+        w_bias = (lpos[1] - gpos[1]) / kg
+        kl = lpos[3] / self.grid_size
+        w_scale = kl / kg
+        kg = gpos[2] / self.grid_size
+        h_bias = (lpos[0] - gpos[0]) / kg
+        kl = lpos[2] / self.grid_size
+        h_scale = kl / kg
+        return get_2d_local_sincos_pos_embed(self.embed_dim, self.grid_size, w_bias, w_scale, h_bias, h_scale)
+
+    def __getitem__(self, idx):
+        # 1. 同時讀取 RGB (3通道) 與 Depth (1通道黑白)
+        path = self.image_paths[idx]
+        depth_path = self.depth_paths[idx]
+
+        pil_image = Image.open(path).convert("RGB")
+        depth_image = Image.open(depth_path).convert("L")  # 'L' 代表灰階
+
+        # 2. 取得 Random Crop 的參數，並「同步」套用到 RGB 與 Depth
+        # anchor_pos 裡面包含 (i, j, h, w)，代表裁切的座標與大小
+        anchor_pos, anchor_img_rgb = self.anchor_rcr(pil_image)
+        target_pos, target_img_rgb = self.target_rcr(pil_image)
+
+        # 【核心魔法】：把剛剛切 RGB 的參數 (*anchor_pos)，完美一刀不差地切在 Depth 上
+        anchor_img_depth = F.resized_crop(depth_image, *anchor_pos, (self.resolution, self.resolution),
+                                          transforms.InterpolationMode.BILINEAR)
+        target_img_depth = F.resized_crop(depth_image, *target_pos, (self.resolution, self.resolution),
+                                          transforms.InterpolationMode.BILINEAR)
+
+        # 計算位置編碼 (維持原作者邏輯)
+        target_pos_embed = self.calculate_sin_cos(target_pos, anchor_pos)
+
+        # 3. 轉為 Numpy Array 並正規化到 [-1, 1]
+        anchor_img_rgb = np.array(anchor_img_rgb) / 127.5 - 1.0  # [H, W, 3]
+        anchor_img_depth = np.array(anchor_img_depth) / 127.5 - 1.0  # [H, W]
+        anchor_img_depth = np.expand_dims(anchor_img_depth, axis=2)  # [H, W, 1]
+
+        target_img_rgb = np.array(target_img_rgb) / 127.5 - 1.0  # [H, W, 3]
+        target_img_depth = np.array(target_img_depth) / 127.5 - 1.0  # [H, W]
+        target_img_depth = np.expand_dims(target_img_depth, axis=2)  # [H, W, 1]
+
+        # 4. 疊加成 4 通道！
+        anchor_4ch = np.concatenate([anchor_img_rgb, anchor_img_depth], axis=2)  # [H, W, 4]
+        target_4ch = np.concatenate([target_img_rgb, target_img_depth], axis=2)  # [H, W, 4]
+
+        # 5. 轉換為 PyTorch 習慣的 [C, H, W] 排列
+        anchor_4ch = np.transpose(anchor_4ch, [2, 0, 1])  # [4, H, W]
+        target_4ch = np.transpose(target_4ch, [2, 0, 1])  # [4, H, W]
+
+        # 回傳 4 通道 Target, 4 通道 Anchor, 以及相對座標編碼
+        return target_4ch, anchor_4ch, target_pos_embed
 
 def _list_image_files_recursively(data_dir):
     results = []

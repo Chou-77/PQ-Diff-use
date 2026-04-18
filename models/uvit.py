@@ -233,20 +233,22 @@ class UViT(nn.Module):
     # === 新增：L2 特徵蒸餾 Loss 計算函數 (供 train_ldm.py 呼叫) ===
     # ============================================================
     def forward_feature_loss(self, anchor_view, target_pos, target_view):
-        """用 L2 Loss 模擬對比學習：強迫模型預測出正確的全局語意藍圖"""
-        # 1. 將圖片轉為特徵：[B, C, H, W] -> [B, L, D]
+        """用 Cosine Similarity + L1 模擬對比學習，並回傳 Batch 中每張圖獨立的 Loss"""
         anchor_emb = self.semantic_proj(anchor_view).flatten(2).transpose(1, 2)
-
-        # 2. 模型憑空預測目標區域的語意
-        # (加上 self.masked_embed 以對齊訓練時的特徵分佈)
         query_pos = target_pos + self.masked_embed
         target_semantic_pred = self.semantic_cross_attn(anchor_emb, query_pos)
-
-        # 3. 取得真正的目標區域語意 (Teacher/Ground Truth)
         target_emb_gt = self.semantic_proj(target_view).flatten(2).transpose(1, 2)
 
-        # 4. 計算 MSE Loss (蒸餾)
-        loss = nn.functional.mse_loss(target_semantic_pred, target_emb_gt.detach())
+        # 1. Cosine Similarity (注意：在 L 維度做平均，保留 B 維度)
+        cos_sim = torch.nn.functional.cosine_similarity(target_semantic_pred, target_emb_gt.detach(), dim=-1) # [B, L]
+        cos_loss = 1.0 - cos_sim.mean(dim=1) # 形狀: [B]
+
+        # 2. L1 Loss (注意：reduction='none' 才能保留 B 維度)
+        l1_loss = torch.nn.functional.l1_loss(target_semantic_pred, target_emb_gt.detach(), reduction='none') # [B, L, D]
+        l1_loss = l1_loss.mean(dim=[1, 2]) # 形狀: [B]
+
+        # 回傳每張圖片各自的總 Loss，形狀為 [B]
+        loss = 1.0 * cos_loss + 0.1 * l1_loss
         return loss
 
     def forward(self, x, conditions, timesteps):
