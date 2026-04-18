@@ -161,7 +161,7 @@ class ImageDataset(Dataset):
         # 深度圖放在包含 'depth_maps' 名稱的資料夾
         # 如果你的資料夾名稱不同，請修改以下兩個變數：
         # =========================================================
-        rgb_folder = 'rgb_images'
+        rgb_folder = 'images'
         depth_folder = 'depth_maps'
 
         for i in range(len(image_paths)):

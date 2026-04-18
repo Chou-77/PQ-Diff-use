@@ -33,12 +33,27 @@ from torchvision.utils import save_image
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 from eval_dir.inception import inception_score
+import cv2
+from transformers import pipeline
 
+# def encode(_batch, autoencoder):
+#     return autoencoder.encode(_batch)
+#
+# def decode(_batch, autoencoder):
+#     return autoencoder.decode(_batch)
 def encode(_batch, autoencoder):
-    return autoencoder.encode(_batch)
+    rgb = _batch[:, :3, :, :]
+    depth = _batch[:, 3:, :, :]
+    latent_rgb = autoencoder.encode(rgb)
+    latent_depth = torch.nn.functional.interpolate(depth, size=latent_rgb.shape[2:], mode='bilinear', align_corners=False)
+    return torch.cat([latent_rgb, latent_depth], dim=1)
 
 def decode(_batch, autoencoder):
-    return autoencoder.decode(_batch)
+    latent_rgb = _batch[:, :-1, :, :]
+    latent_depth = _batch[:, -1:, :, :]
+    rgb = autoencoder.decode(latent_rgb)
+    depth = torch.nn.functional.interpolate(latent_depth, size=rgb.shape[2:], mode='bilinear', align_corners=False)
+    return torch.cat([rgb, depth], dim=1)
 
 def unpreprocess(v):
     v = 0.5 * (v + 1.)
@@ -214,6 +229,9 @@ def sampling(args, config):
     # args.gpu = 'cuda:1'
     autoencoder = libs.autoencoder.get_model("assets/stable-diffusion/autoencoder_kl.pth")
     autoencoder.to(args.gpu)
+    print("載入 Depth Anything V2 進行動態推論 (確保零資訊洩漏)...")
+    depth_estimator = pipeline(task="depth-estimation", model="depth-anything/Depth-Anything-V2-Small-hf",
+                               device=args.gpu)
     train_state = utils.initialize_train_state(config, args.gpu)
     train_state.resume(config.ckpt_root)
     nnet = train_state.nnet
@@ -235,22 +253,76 @@ def sampling(args, config):
     # o_scores, g_scores = [], []
     patch_mean, patch_std = 0.5044838, 0.1355051
     transform_out = transforms.Normalize(mean=torch.tensor((patch_mean,patch_mean,patch_mean)),  std=torch.tensor((patch_std,patch_std,patch_std)))
+    # for batch_idx, (input_img, target_img) in tqdm(enumerate(dataloader)):
+    #     input_img = input_img.to(args.gpu).float()
+    #     target_img = target_img.to(args.gpu).float()
+    #     prime_target_position = prime_target_pos.unsqueeze(0).repeat(input_img.size(0), 1, 1).float()
+    #     encode_anchor = encode(input_img, autoencoder)
+    #     z_init = torch.randn(encode_anchor.size(), device=args.gpu)
+    #     noise_schedule = NoiseScheduleVP(schedule='linear')
+    #     kwargs = {'conditions': [encode_anchor, prime_target_position]}
+    #     model_fn = model_wrapper(score_model_ema.noise_pred, noise_schedule, time_input_type='0', model_kwargs=kwargs)
+    #     dpm_solver = DPM_Solver(model_fn, noise_schedule)
+    #     z = dpm_solver.sample(z_init, steps=50, eps=1e-4, adaptive_step_size=False, fast_version=False)
+    #     end = time.time()
+    #     pred_target = decode(z, autoencoder)
+    #
+    #     pred_target = unpreprocess(pred_target)
+    #     input_img = unpreprocess(input_img)
+    #
+    #     pred_target = transform_out(pred_target)
+    #     input_img = transform_out(input_img)
+    #     for i in range(pred_target.size(0)):
+    #         index = batch_idx * args.batch_size + i + args.rank * pred_target.size(0)
+    #         plt.imsave(f'{args.eval_dir}/gen/{index}.png', denorm_img(pred_target[i:i + 1]), vmin=0, vmax=1)
+    #         plt.imsave(f'{args.eval_dir}/ori/{index}.png', denorm_img(input_img[i:i + 1]), vmin=0, vmax=1)
     for batch_idx, (input_img, target_img) in tqdm(enumerate(dataloader)):
         input_img = input_img.to(args.gpu).float()
         target_img = target_img.to(args.gpu).float()
+
+        # =====================================================================
+        # === 【嚴謹防弊】：動態在「已經裁切好」的輸入小圖上算景深 ===
+        # =====================================================================
+        input_depths = []
+        for i in range(input_img.size(0)):
+            # 將 [-1, 1] 的 Tensor 轉回純影像格式
+            single_rgb = (input_img[i].cpu().numpy().transpose(1, 2, 0) + 1.0) * 127.5
+            single_rgb = np.clip(single_rgb, 0, 255).astype(np.uint8)
+            pil_img = Image.fromarray(single_rgb)
+
+            # 萃取單獨這張小圖的景深 (絕對看不見右半邊，保證無洩漏！)
+            depth_out = depth_estimator(pil_img)["depth"]
+            depth_array = np.array(depth_out)
+            depth_norm = cv2.normalize(depth_array, None, 0, 255, cv2.NORM_MINMAX, dtype=cv2.CV_8U)
+
+            # 轉回 Tensor [-1, 1]
+            depth_tensor = torch.from_numpy(depth_norm).float().unsqueeze(0) / 127.5 - 1.0
+            input_depths.append(depth_tensor)
+
+        # 疊合成 4 通道 [B, 4, H, W]
+        input_depth_batch = torch.stack(input_depths).to(args.gpu)
+        input_4ch = torch.cat([input_img, input_depth_batch], dim=1)
+        # =====================================================================
+
         prime_target_position = prime_target_pos.unsqueeze(0).repeat(input_img.size(0), 1, 1).float()
-        encode_anchor = encode(input_img, autoencoder)
+
+        # 餵給 encode 的是我們剛組裝好的 4 通道 input_4ch！
+        encode_anchor = encode(input_4ch, autoencoder)
         z_init = torch.randn(encode_anchor.size(), device=args.gpu)
         noise_schedule = NoiseScheduleVP(schedule='linear')
         kwargs = {'conditions': [encode_anchor, prime_target_position]}
         model_fn = model_wrapper(score_model_ema.noise_pred, noise_schedule, time_input_type='0', model_kwargs=kwargs)
         dpm_solver = DPM_Solver(model_fn, noise_schedule)
         z = dpm_solver.sample(z_init, steps=50, eps=1e-4, adaptive_step_size=False, fast_version=False)
-        end = time.time()
+
         pred_target = decode(z, autoencoder)
 
+        # === 儲存時切回 3 通道 ===
+        pred_target = pred_target[:, :3, :, :]
+        input_img_rgb = input_img[:, :3, :, :]
+
         pred_target = unpreprocess(pred_target)
-        input_img = unpreprocess(input_img)
+        input_img = unpreprocess(input_img_rgb)
 
         pred_target = transform_out(pred_target)
         input_img = transform_out(input_img)
