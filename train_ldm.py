@@ -66,13 +66,43 @@ def train(config):
     autoencoder = libs.autoencoder.get_model(config.autoencoder.pretrained_path)
     autoencoder.to(device)
 
+    # @torch.cuda.amp.autocast()
+    # def encode(_batch):
+    #     return autoencoder.encode(_batch)
+    #
+    # @torch.cuda.amp.autocast()
+    # def decode(_batch):
+    #     return autoencoder.decode(_batch)
     @torch.cuda.amp.autocast()
     def encode(_batch):
-        return autoencoder.encode(_batch)
+        # 拆分 RGB (前3通道) 和 Depth (最後1通道)
+        rgb = _batch[:, :3, :, :]
+        depth = _batch[:, 3:, :, :]
+
+        # 只讓 RGB 通過 autoencoder
+        latent_rgb = autoencoder.encode(rgb)
+
+        # 讓 Depth 縮放對齊 latent_rgb 的尺寸
+        latent_depth = torch.nn.functional.interpolate(depth, size=latent_rgb.shape[2:], mode='bilinear',
+                                                       align_corners=False)
+
+        # 重新黏合回 4 通道
+        return torch.cat([latent_rgb, latent_depth], dim=1)
 
     @torch.cuda.amp.autocast()
     def decode(_batch):
-        return autoencoder.decode(_batch)
+        # 拆分 Latent RGB 和 Latent Depth
+        latent_rgb = _batch[:, :-1, :, :]
+        latent_depth = _batch[:, -1:, :, :]
+
+        # 只讓 RGB 通過 autoencoder 解碼
+        rgb = autoencoder.decode(latent_rgb)
+
+        # 讓 Depth 放大對齊 rgb 的尺寸
+        depth = torch.nn.functional.interpolate(latent_depth, size=rgb.shape[2:], mode='bilinear', align_corners=False)
+
+        # 重新黏合回 4 通道
+        return torch.cat([rgb, depth], dim=1)
 
     def get_data_generator():
         while True:
@@ -99,26 +129,26 @@ def train(config):
                 # =========================================================================
                 # === 【重要新增】：特徵蒸餾 (Feature Distillation) 的 50% 課程學習策略 ===
                 # =========================================================================
-                if train_state.step <= config.train.n_steps // 2:
-                    # 取得 Batch 中每張圖各自的特徵 Loss (形狀為 [B])
-                    l_feat_batch = accelerator.unwrap_model(nnet).forward_feature_loss(encode_anchor, prime_targe_pos,
-                                                                                       encode_target)
-
-                    # 【關鍵防禦】：偵測哪些圖是「非空白」的正常圖片 (排除 CFG dropout 的干擾)
-                    # 判斷方式：如果一張圖的絕對值總和極小 (< 1e-4)，代表它是被捨棄的空白圖
-                    is_active = (prime_anchor_view.abs().view(prime_anchor_view.shape[0], -1).sum(dim=1) > 1e-4)
-
-                    decay_weight = math.cos(train_state.step / config.train.n_steps * math.pi)
-
-                    # 只計算那些「正常圖片」的特徵蒸餾 Loss，並把權重降為 0.5 避免喧賓奪主
-                    if is_active.sum() > 0:
-                        valid_l_feat = l_feat_batch[is_active].mean()
-                        loss = loss + 0.5 * valid_l_feat * decay_weight
-
-                        # 記錄到 wandb
-                        _metrics['l_feat'] = accelerator.gather(valid_l_feat.detach()).mean()
-                    else:
-                        _metrics['l_feat'] = torch.tensor(0.0, device=device)
+                # if train_state.step <= config.train.n_steps // 2:
+                #     # 取得 Batch 中每張圖各自的特徵 Loss (形狀為 [B])
+                #     l_feat_batch = accelerator.unwrap_model(nnet).forward_feature_loss(encode_anchor, prime_targe_pos,
+                #                                                                        encode_target)
+                #
+                #     # 【關鍵防禦】：偵測哪些圖是「非空白」的正常圖片 (排除 CFG dropout 的干擾)
+                #     # 判斷方式：如果一張圖的絕對值總和極小 (< 1e-4)，代表它是被捨棄的空白圖
+                #     is_active = (prime_anchor_view.abs().view(prime_anchor_view.shape[0], -1).sum(dim=1) > 1e-4)
+                #
+                #     decay_weight = math.cos(train_state.step / config.train.n_steps * math.pi)
+                #
+                #     # 只計算那些「正常圖片」的特徵蒸餾 Loss，並把權重降為 0.5 避免喧賓奪主
+                #     if is_active.sum() > 0:
+                #         valid_l_feat = l_feat_batch[is_active].mean()
+                #         loss = loss + 0.5 * valid_l_feat * decay_weight
+                #
+                #         # 記錄到 wandb
+                #         _metrics['l_feat'] = accelerator.gather(valid_l_feat.detach()).mean()
+                #     else:
+                #         _metrics['l_feat'] = torch.tensor(0.0, device=device)
                 # =========================================================================
 
             else:
@@ -169,18 +199,29 @@ def train(config):
             else:
                 raise NotImplementedError
 
-            pred_target = decode(z)
+            # pred_target = decode(z)
+            # pred_target = make_grid(dataset.unpreprocess(pred_target), 10)
+            #
+            # decode_target = decode(encode_target)
+            # decode_target = make_grid(dataset.unpreprocess(decode_target), 10)
+            #
+            # prime_target = make_grid(dataset.unpreprocess(prime_target), 10)
+            # 【關鍵修改】：所有的圖都只取前 3 個通道 (RGB) 去做視覺化儲存
+            pred_target = decode(z)[:, :3, :, :]
             pred_target = make_grid(dataset.unpreprocess(pred_target), 10)
 
-            decode_target = decode(encode_target)
+            decode_target = decode(encode_target)[:, :3, :, :]
             decode_target = make_grid(dataset.unpreprocess(decode_target), 10)
 
+            prime_target = prime_target[:, :3, :, :]
             prime_target = make_grid(dataset.unpreprocess(prime_target), 10)
 
-            decode_anchor = decode(encode_anchor)
+            decode_anchor = decode(encode_anchor)[:, :3, :, :]
             decode_anchor = make_grid(dataset.unpreprocess(decode_anchor), 10)
 
+            prime_anchor_view = prime_anchor_view[:, :3, :, :]
             prime_anchor_view = make_grid(dataset.unpreprocess(prime_anchor_view), 10)
+
 
             save_image(pred_target, os.path.join(config.sample_dir, f'predict_target-{train_state.step}.png'))
             save_image(decode_target, os.path.join(config.sample_dir, f'decode_target-{train_state.step}.png'))

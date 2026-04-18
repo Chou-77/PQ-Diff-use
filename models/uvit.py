@@ -158,7 +158,7 @@ class CrossAttention(nn.Module):
 
 
 class UViT(nn.Module):
-    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.,
+    def __init__(self, img_size=224, patch_size=16, in_chans=4, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.,
                  qkv_bias=False, qk_scale=None, norm_layer=nn.LayerNorm, mlp_time_embed=False, num_classes=-1,
                  use_checkpoint=False, conv=True, skip=True):
         super().__init__()
@@ -188,8 +188,8 @@ class UViT(nn.Module):
         # ============================================================
         # === 新增：輕量級語意預測器 (Semantic Predictor) ===
         # ============================================================
-        self.semantic_proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        self.semantic_cross_attn = CrossAttention(dim=embed_dim, num_heads=num_heads)
+        # self.semantic_proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
+        # self.semantic_cross_attn = CrossAttention(dim=embed_dim, num_heads=num_heads)
 
         self.in_blocks = nn.ModuleList([
             Block(
@@ -229,42 +229,35 @@ class UViT(nn.Module):
     def no_weight_decay(self):
         return {'pos_embed'}
 
-    # ============================================================
-    # === 新增：L2 特徵蒸餾 Loss 計算函數 (供 train_ldm.py 呼叫) ===
-    # ============================================================
-    def forward_feature_loss(self, anchor_view, target_pos, target_view):
-        """用 Cosine Similarity + L1 模擬對比學習，並回傳 Batch 中每張圖獨立的 Loss"""
-        anchor_emb = self.semantic_proj(anchor_view).flatten(2).transpose(1, 2)
-        query_pos = target_pos + self.masked_embed
-        target_semantic_pred = self.semantic_cross_attn(anchor_emb, query_pos)
-        target_emb_gt = self.semantic_proj(target_view).flatten(2).transpose(1, 2)
-
-        # 1. Cosine Similarity (注意：在 L 維度做平均，保留 B 維度)
-        cos_sim = torch.nn.functional.cosine_similarity(target_semantic_pred, target_emb_gt.detach(), dim=-1) # [B, L]
-        cos_loss = 1.0 - cos_sim.mean(dim=1) # 形狀: [B]
-
-        # 2. L1 Loss (注意：reduction='none' 才能保留 B 維度)
-        l1_loss = torch.nn.functional.l1_loss(target_semantic_pred, target_emb_gt.detach(), reduction='none') # [B, L, D]
-        l1_loss = l1_loss.mean(dim=[1, 2]) # 形狀: [B]
-
-        # 回傳每張圖片各自的總 Loss，形狀為 [B]
-        loss = 1.0 * cos_loss + 0.1 * l1_loss
-        return loss
+    # # ============================================================
+    # # === 新增：L2 特徵蒸餾 Loss 計算函數 (供 train_ldm.py 呼叫) ===
+    # # ============================================================
+    # def forward_feature_loss(self, anchor_view, target_pos, target_view):
+    #     """用 Cosine Similarity + L1 模擬對比學習，並回傳 Batch 中每張圖獨立的 Loss"""
+    #     anchor_emb = self.semantic_proj(anchor_view).flatten(2).transpose(1, 2)
+    #     query_pos = target_pos + self.masked_embed
+    #     target_semantic_pred = self.semantic_cross_attn(anchor_emb, query_pos)
+    #     target_emb_gt = self.semantic_proj(target_view).flatten(2).transpose(1, 2)
+    #
+    #     # 1. Cosine Similarity (注意：在 L 維度做平均，保留 B 維度)
+    #     cos_sim = torch.nn.functional.cosine_similarity(target_semantic_pred, target_emb_gt.detach(), dim=-1) # [B, L]
+    #     cos_loss = 1.0 - cos_sim.mean(dim=1) # 形狀: [B]
+    #
+    #     # 2. L1 Loss (注意：reduction='none' 才能保留 B 維度)
+    #     l1_loss = torch.nn.functional.l1_loss(target_semantic_pred, target_emb_gt.detach(), reduction='none') # [B, L, D]
+    #     l1_loss = l1_loss.mean(dim=[1, 2]) # 形狀: [B]
+    #
+    #     # 回傳每張圖片各自的總 Loss，形狀為 [B]
+    #     loss = 1.0 * cos_loss + 0.1 * l1_loss
+    #     return loss
 
     def forward(self, x, conditions, timesteps):
         anchor_view, target_pos = conditions
 
-        # ============================================================
-        # === 新增：擴散去噪前，先生成語意藍圖 ===
-        # ============================================================
-        # 提取已知區域的基礎特徵
-        anchor_emb = self.semantic_proj(anchor_view).flatten(2).transpose(1, 2)
-        # 生成語意藍圖
-        query_pos = target_pos + self.masked_embed
-        target_semantic_pred = self.semantic_cross_attn(anchor_emb, query_pos)
-
-        x = torch.cat([anchor_view, x], dim=1)  # batch, 3+1, H, W
+        # 最暴力的拼接：左邊 4 通道 + 右邊 4 通道雜訊 = 8 通道
+        x = torch.cat([anchor_view, x], dim=1)  # batch, 8, H, W
         x = self.patch_embed(x)
+
         target_pos = target_pos + self.masked_embed
 
         # add time embeddings
@@ -274,9 +267,9 @@ class UViT(nn.Module):
         B, L, D = x.shape
 
         # ============================================================
-        # === 魔法融合：絕對座標 + 語意藍圖 + 雜訊 ===
+        # === 魔法融合：只留下絕對座標 + 雜訊 (不再加語意藍圖) ===
         # ============================================================
-        x = target_pos + x + target_semantic_pred
+        x = target_pos + x
 
         # add conditions
         x = torch.cat((time_token, x), dim=1)
