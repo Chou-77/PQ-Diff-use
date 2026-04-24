@@ -75,34 +75,14 @@ def train(config):
     #     return autoencoder.decode(_batch)
     @torch.cuda.amp.autocast()
     def encode(_batch):
-        # 拆分 RGB (前3通道) 和 Depth (最後1通道)
+        # 完全拋棄景深，只取前 3 個通道 (RGB) 給 Autoencoder
         rgb = _batch[:, :3, :, :]
-        depth = _batch[:, 3:, :, :]
-
-        # 只讓 RGB 通過 autoencoder
-        latent_rgb = autoencoder.encode(rgb)
-
-        # 讓 Depth 縮放對齊 latent_rgb 的尺寸
-        latent_depth = torch.nn.functional.interpolate(depth, size=latent_rgb.shape[2:], mode='bilinear',
-                                                       align_corners=False)
-
-        # 重新黏合回 4 通道
-        return torch.cat([latent_rgb, latent_depth], dim=1)
+        return autoencoder.encode(rgb)
 
     @torch.cuda.amp.autocast()
     def decode(_batch):
-        # 拆分 Latent RGB 和 Latent Depth
-        latent_rgb = _batch[:, :-1, :, :]
-        latent_depth = _batch[:, -1:, :, :]
-
-        # 只讓 RGB 通過 autoencoder 解碼
-        rgb = autoencoder.decode(latent_rgb)
-
-        # 讓 Depth 放大對齊 rgb 的尺寸
-        depth = torch.nn.functional.interpolate(latent_depth, size=rgb.shape[2:], mode='bilinear', align_corners=False)
-
-        # 重新黏合回 4 通道
-        return torch.cat([rgb, depth], dim=1)
+        # _batch 裡面現在只有純 Latent RGB，直接解碼
+        return autoencoder.decode(_batch)
 
     def get_data_generator():
         while True:
@@ -207,20 +187,24 @@ def train(config):
             #
             # prime_target = make_grid(dataset.unpreprocess(prime_target), 10)
             # 【關鍵修改】：所有的圖都只取前 3 個通道 (RGB) 去做視覺化儲存
-            pred_target = decode(z)[:, :3, :, :]
+                # 【修正】：因為已經沒有景深了，decode 出來直接就是純 RGB，不用再 [:, :3, :, :]
+            pred_target = decode(z)
             pred_target = make_grid(dataset.unpreprocess(pred_target), 10)
 
-            decode_target = decode(encode_target)[:, :3, :, :]
+            decode_target = decode(encode_target)
             decode_target = make_grid(dataset.unpreprocess(decode_target), 10)
 
-            prime_target = prime_target[:, :3, :, :]
-            prime_target = make_grid(dataset.unpreprocess(prime_target), 10)
+                # prime_target 跟 prime_anchor_view 是 DataLoader 來的，如果你 DataLoader 還是吐 4 通道，這裡才需要切片
+            prime_target_rgb = prime_target[:, :3, :, :]
+            prime_target_rgb = make_grid(dataset.unpreprocess(prime_target_rgb), 10)
 
-            decode_anchor = decode(encode_anchor)[:, :3, :, :]
+            decode_anchor = decode(encode_anchor)
             decode_anchor = make_grid(dataset.unpreprocess(decode_anchor), 10)
 
-            prime_anchor_view = prime_anchor_view[:, :3, :, :]
-            prime_anchor_view = make_grid(dataset.unpreprocess(prime_anchor_view), 10)
+            prime_anchor_view_rgb = prime_anchor_view[:, :3, :, :]
+            prime_anchor_view_rgb = make_grid(dataset.unpreprocess(prime_anchor_view_rgb), 10)
+
+                # 然後再 save_image (...)
 
 
             save_image(pred_target, os.path.join(config.sample_dir, f'predict_target-{train_state.step}.png'))
