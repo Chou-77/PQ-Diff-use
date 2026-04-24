@@ -44,26 +44,34 @@ def unpatchify(x, channels=3):
     x = einops.rearrange(x, 'B (h w) (p1 p2 C) -> B C (h p1) (w p2)', h=h, p1=patch_size, p2=patch_size)
     return x
 
-# ==========================================
-# === 新增：2D RoPE (Rotary Position Embedding) ===
-# ==========================================
+
 def rotate_half(x):
     """將特徵的最後一個維度切半並旋轉"""
     x1, x2 = x.chunk(2, dim=-1)
     return torch.cat((-x2, x1), dim=-1)
 
 def apply_rotary_emb(x, freqs):
-    """對 Query 和 Key 應用旋轉位置編碼"""
-    # x 形狀: [B, H, L, D] 或 [B, L, H, D]
-    # freqs 必須能 Broadcast 到 x 的形狀
-    return x * freqs.cos() + rotate_half(x) * freqs.sin()
+    """對 Query 和 Key 獨立應用 X 與 Y 的旋轉位置編碼"""
+    # 確保切分為 X 子空間與 Y 子空間
+    d_2 = x.shape[-1] // 2
+    x_x = x[..., :d_2]  # X 軸特徵
+    x_y = x[..., d_2:]  # Y 軸特徵
+
+    freqs_x = freqs[..., :d_2]
+    freqs_y = freqs[..., d_2:]
+
+    # 各自在獨立的子空間內旋轉 (X 不會污染 Y)
+    out_x = x_x * freqs_x.cos() + rotate_half(x_x) * freqs_x.sin()
+    out_y = x_y * freqs_y.cos() + rotate_half(x_y) * freqs_y.sin()
+
+    return torch.cat([out_x, out_y], dim=-1)
 
 class RoPE2D(nn.Module):
     def __init__(self, dim, base=10000.0):
         super().__init__()
         # 2D 座標有 X 和 Y，每個佔用一半的 head dimension
         self.half_dim = dim // 2
-        # 建立頻率衰減
+        # 建立頻率衰減 (維度為 half_dim / 2)
         inv_freq = 1.0 / (base ** (torch.arange(0, self.half_dim, 2).float() / self.half_dim))
         self.register_buffer("inv_freq", inv_freq)
 
@@ -75,13 +83,13 @@ class RoPE2D(nn.Module):
         x_coords = coords[..., 0].float()
         y_coords = coords[..., 1].float()
 
-        # 計算 X 和 Y 各自的旋轉頻率 [B, L, dim/4]
+        # 計算 X 和 Y 各自的旋轉頻率 [B, L, half_dim / 2]
         freqs_x = torch.einsum("bl,f->blf", x_coords, self.inv_freq)
         freqs_y = torch.einsum("bl,f->blf", y_coords, self.inv_freq)
 
-        # 針對 sin/cos 展開兩次 [B, L, dim/2]
-        freqs_x = torch.repeat_interleave(freqs_x, 2, dim=-1)
-        freqs_y = torch.repeat_interleave(freqs_y, 2, dim=-1)
+        # 為了搭配 rotate_half，直接複製拼接 [f1, f2] -> [f1, f2, f1, f2]
+        freqs_x = torch.cat([freqs_x, freqs_x], dim=-1) # [B, L, half_dim]
+        freqs_y = torch.cat([freqs_y, freqs_y], dim=-1) # [B, L, half_dim]
 
         # 拼接 X 和 Y 的特徵形成完整的 head dimension [B, L, dim]
         freqs = torch.cat([freqs_x, freqs_y], dim=-1)

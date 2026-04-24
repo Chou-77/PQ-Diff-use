@@ -249,11 +249,20 @@ class ImageDataset(Dataset):
         w_bias = (lpos[1] - gpos[1]) / kg
         kl = lpos[3] / self.grid_size
         w_scale = kl / kg
+
         kg = gpos[2] / self.grid_size
         h_bias = (lpos[0] - gpos[0]) / kg
         kl = lpos[2] / self.grid_size
         h_scale = kl / kg
-        return get_2d_local_sincos_pos_embed(self.embed_dim, self.grid_size, w_bias, w_scale, h_bias, h_scale)
+
+        # 建立真實的二維座標網格 (X, Y)
+        grid_h = np.arange(h_bias, self.grid_size * h_scale + h_bias - 0.01, h_scale, dtype=np.float32)
+        grid_w = np.arange(w_bias, self.grid_size * w_scale + w_bias - 0.01, w_scale, dtype=np.float32)
+        grid = np.meshgrid(grid_w, grid_h)  # W 優先 (X 軸)
+        grid = np.stack(grid, axis=-1)  # 形狀: [grid_size, grid_size, 2]
+
+        # 展平為 [L, 2] 並回傳
+        return grid.reshape(-1, 2)
 
     def __getitem__(self, idx):
         # 1. 同時讀取 RGB (3通道) 與 Depth (1通道黑白)
