@@ -44,6 +44,48 @@ def unpatchify(x, channels=3):
     x = einops.rearrange(x, 'B (h w) (p1 p2 C) -> B C (h p1) (w p2)', h=h, p1=patch_size, p2=patch_size)
     return x
 
+# ==========================================
+# === 新增：2D RoPE (Rotary Position Embedding) ===
+# ==========================================
+def rotate_half(x):
+    """將特徵的最後一個維度切半並旋轉"""
+    x1, x2 = x.chunk(2, dim=-1)
+    return torch.cat((-x2, x1), dim=-1)
+
+def apply_rotary_emb(x, freqs):
+    """對 Query 和 Key 應用旋轉位置編碼"""
+    # x 形狀: [B, H, L, D] 或 [B, L, H, D]
+    # freqs 必須能 Broadcast 到 x 的形狀
+    return x * freqs.cos() + rotate_half(x) * freqs.sin()
+
+class RoPE2D(nn.Module):
+    def __init__(self, dim, base=10000.0):
+        super().__init__()
+        # 2D 座標有 X 和 Y，每個佔用一半的 head dimension
+        self.half_dim = dim // 2
+        # 建立頻率衰減
+        inv_freq = 1.0 / (base ** (torch.arange(0, self.half_dim, 2).float() / self.half_dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+    def forward(self, coords):
+        """
+        coords: [B, L, 2] 代表每個 Patch 的 (X, Y) 網格絕對/相對座標
+        回傳 freqs: [B, L, dim]
+        """
+        x_coords = coords[..., 0].float()
+        y_coords = coords[..., 1].float()
+
+        # 計算 X 和 Y 各自的旋轉頻率 [B, L, dim/4]
+        freqs_x = torch.einsum("bl,f->blf", x_coords, self.inv_freq)
+        freqs_y = torch.einsum("bl,f->blf", y_coords, self.inv_freq)
+
+        # 針對 sin/cos 展開兩次 [B, L, dim/2]
+        freqs_x = torch.repeat_interleave(freqs_x, 2, dim=-1)
+        freqs_y = torch.repeat_interleave(freqs_y, 2, dim=-1)
+
+        # 拼接 X 和 Y 的特徵形成完整的 head dimension [B, L, dim]
+        freqs = torch.cat([freqs_x, freqs_y], dim=-1)
+        return freqs
 
 class Shift(nn.Module):
     def __init__(self, dim, proj_drop=0.):
@@ -71,18 +113,34 @@ class Attention(nn.Module):
         self.proj = nn.Linear(dim, dim)
         self.proj_drop = nn.Dropout(proj_drop)
 
-    def forward(self, x):
+    def forward(self, x, freqs=None):  # <-- 新增 freqs 參數
         B, L, C = x.shape
-
         qkv = self.qkv(x)
-        if XFORMERS_IS_AVAILBLE:  # the xformers lib allows less memory, faster training and inference
+
+        if XFORMERS_IS_AVAILBLE:
             qkv = einops.rearrange(qkv, 'B L (K H D) -> K B L H D', K=3, H=self.num_heads)
-            q, k, v = qkv[0], qkv[1], qkv[2]  # B L H D
+            q, k, v = qkv[0], qkv[1], qkv[2]  # [B, L, H, D]
+
+            # --- 套用 RoPE ---
+            if freqs is not None:
+                freqs_xf = freqs.unsqueeze(2)  # 變成 [B, L, 1, D] 以適應 xformers 形狀
+                q = apply_rotary_emb(q, freqs_xf)
+                k = apply_rotary_emb(k, freqs_xf)
+            # -----------------
+
             x = xformers.ops.memory_efficient_attention(q, k, v)
             x = einops.rearrange(x, 'B L H D -> B L (H D)', H=self.num_heads)
         else:
             qkv = einops.rearrange(qkv, 'B L (K H D) -> K B H L D', K=3, H=self.num_heads)
-            q, k, v = qkv[0], qkv[1], qkv[2]  # B H L D
+            q, k, v = qkv[0], qkv[1], qkv[2]  # [B, H, L, D]
+
+            # --- 套用 RoPE ---
+            if freqs is not None:
+                freqs_std = freqs.unsqueeze(1)  # 變成 [B, 1, L, D] 以適應標準 attention
+                q = apply_rotary_emb(q, freqs_std)
+                k = apply_rotary_emb(k, freqs_std)
+            # -----------------
+
             attn = (q @ k.transpose(-2, -1)) * self.scale
             attn = attn.softmax(dim=-1)
             attn = self.attn_drop(attn)
@@ -91,7 +149,6 @@ class Attention(nn.Module):
         x = self.proj(x)
         x = self.proj_drop(x)
         return x
-
 
 class Block(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None,
@@ -106,19 +163,21 @@ class Block(nn.Module):
         self.skip_linear = nn.Linear(2 * dim, dim) if skip else None
         self.use_checkpoint = use_checkpoint
 
-    def forward(self, x, skip=None):
+    def forward(self, x, skip=None, freqs=None):  # <-- 傳遞 freqs
         if self.use_checkpoint:
-            return torch.utils.checkpoint.checkpoint(self._forward, x, skip)
+            return torch.utils.checkpoint.checkpoint(self._forward, x, skip, freqs)
         else:
-            return self._forward(x, skip)
+            return self._forward(x, skip, freqs)
 
-    def _forward(self, x, skip=None):
+    def _forward(self, x, skip=None, freqs=None):
         if self.skip_linear is not None:
             x = self.skip_linear(torch.cat([x, skip], dim=-1))
-        x = x + self.attn(self.norm1(x))
+
+        # 注意：將 freqs 傳給 Attention
+        attn_out = self.attn(self.norm1(x), freqs=freqs)
+        x = x + attn_out
         x = x + self.mlp(self.norm2(x))
         return x
-
 
 # =========================================================================
 # === 新增：用於語意蒸餾的純淨 CrossAttention (無距離遮罩，完全輕量化) ===
@@ -158,17 +217,17 @@ class CrossAttention(nn.Module):
 
 
 class UViT(nn.Module):
-    def __init__(self, img_size=224, patch_size=16, in_chans=4, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.,
+    def __init__(self, img_size=224, patch_size=16, in_chans=3, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4.,
                  qkv_bias=False, qk_scale=None, norm_layer=nn.LayerNorm, mlp_time_embed=False, num_classes=-1,
                  use_checkpoint=False, conv=True, skip=True):
         super().__init__()
-        self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
+        self.num_features = self.embed_dim = embed_dim
         self.num_classes = num_classes
         self.in_chans = in_chans
 
+        # 注意：你的模型將 Anchor View (3通道) 和 x (3通道) 合併，所以 in_chans 要 * 2
         self.patch_embed = PatchEmbed(
             img_size=img_size, patch_size=patch_size, in_chans=in_chans * 2, embed_dim=embed_dim)
-        num_patches = self.patch_embed.num_patches
 
         self.time_embed = nn.Sequential(
             nn.Linear(embed_dim, 4 * embed_dim),
@@ -176,41 +235,31 @@ class UViT(nn.Module):
             nn.Linear(4 * embed_dim, embed_dim),
         ) if mlp_time_embed else nn.Identity()
 
-        self.masked_embed = nn.Parameter(torch.randn(embed_dim))
+        # 這裡初始化 2D RoPE (計算 head_dim)
+        head_dim = embed_dim // num_heads
+        self.rope2d = RoPE2D(dim=head_dim)
 
-        if self.num_classes > 0:
-            self.extras = 2
-        else:
-            self.extras = 1
-
-        self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim), requires_grad=False)
-
-        # ============================================================
-        # === 新增：輕量級語意預測器 (Semantic Predictor) ===
-        # ============================================================
-        # self.semantic_proj = nn.Conv2d(in_chans, embed_dim, kernel_size=patch_size, stride=patch_size)
-        # self.semantic_cross_attn = CrossAttention(dim=embed_dim, num_heads=num_heads)
+        # 拔除 self.pos_embed 和 self.cross_attn (或是將 pos_embed 當成純粹的可學習 bias 留下也可以，這裡為乾淨直接拔除)
 
         self.in_blocks = nn.ModuleList([
-            Block(
-                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                norm_layer=norm_layer, use_checkpoint=use_checkpoint)
+            Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
+                  qk_scale=qk_scale, norm_layer=norm_layer, use_checkpoint=use_checkpoint)
             for _ in range(depth // 2)])
 
-        self.mid_block = Block(
-            dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-            norm_layer=norm_layer, use_checkpoint=use_checkpoint)
+        self.mid_block = Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio,
+                               qkv_bias=qkv_bias, qk_scale=qk_scale, norm_layer=norm_layer,
+                               use_checkpoint=use_checkpoint)
 
         self.out_blocks = nn.ModuleList([
-            Block(
-                dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias, qk_scale=qk_scale,
-                norm_layer=norm_layer, skip=skip, use_checkpoint=use_checkpoint)
+            Block(dim=embed_dim, num_heads=num_heads, mlp_ratio=mlp_ratio, qkv_bias=qkv_bias,
+                  qk_scale=qk_scale, norm_layer=norm_layer, skip=skip, use_checkpoint=use_checkpoint)
             for _ in range(depth // 2)])
 
         self.norm = norm_layer(embed_dim)
         self.patch_dim = patch_size ** 2 * in_chans
         self.decoder_pred = nn.Linear(embed_dim, self.patch_dim, bias=True)
         self.final_layer = nn.Conv2d(self.in_chans, self.in_chans, 3, padding=1) if conv else nn.Identity()
+
         self.apply(self._init_weights)
 
     def _init_weights(self, m):
@@ -221,72 +270,49 @@ class UViT(nn.Module):
         elif isinstance(m, nn.LayerNorm):
             nn.init.constant_(m.bias, 0)
             nn.init.constant_(m.weight, 1.0)
-        pos_embed = get_2d_sincos_pos_embed(self.pos_embed.shape[-1], int(math.sqrt(self.pos_embed.shape[1])),
-                                            cls_token=False)
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
-
-    @torch.jit.ignore
-    def no_weight_decay(self):
-        return {'pos_embed'}
-
-    # # ============================================================
-    # # === 新增：L2 特徵蒸餾 Loss 計算函數 (供 train_ldm.py 呼叫) ===
-    # # ============================================================
-    # def forward_feature_loss(self, anchor_view, target_pos, target_view):
-    #     """用 Cosine Similarity + L1 模擬對比學習，並回傳 Batch 中每張圖獨立的 Loss"""
-    #     anchor_emb = self.semantic_proj(anchor_view).flatten(2).transpose(1, 2)
-    #     query_pos = target_pos + self.masked_embed
-    #     target_semantic_pred = self.semantic_cross_attn(anchor_emb, query_pos)
-    #     target_emb_gt = self.semantic_proj(target_view).flatten(2).transpose(1, 2)
-    #
-    #     # 1. Cosine Similarity (注意：在 L 維度做平均，保留 B 維度)
-    #     cos_sim = torch.nn.functional.cosine_similarity(target_semantic_pred, target_emb_gt.detach(), dim=-1) # [B, L]
-    #     cos_loss = 1.0 - cos_sim.mean(dim=1) # 形狀: [B]
-    #
-    #     # 2. L1 Loss (注意：reduction='none' 才能保留 B 維度)
-    #     l1_loss = torch.nn.functional.l1_loss(target_semantic_pred, target_emb_gt.detach(), reduction='none') # [B, L, D]
-    #     l1_loss = l1_loss.mean(dim=[1, 2]) # 形狀: [B]
-    #
-    #     # 回傳每張圖片各自的總 Loss，形狀為 [B]
-    #     loss = 1.0 * cos_loss + 0.1 * l1_loss
-    #     return loss
 
     def forward(self, x, conditions, timesteps):
-        anchor_view, target_pos = conditions
+        # ⚠️ 重點修改：傳入的不再是 Target_pos 的高維 Embedding，而是實體的網格座標 (H, W)
+        # pos_coords 的預期形狀為: [B, L, 2] (例如 [Batch, 196, 2])
+        anchor_view, pos_coords = conditions
 
-        # 最暴力的拼接：左邊 4 通道 + 右邊 4 通道雜訊 = 8 通道
-        x = torch.cat([anchor_view, x], dim=1)  # batch, 8, H, W
+        x = x.float()
+        anchor_view = anchor_view.float()
+        pos_coords = pos_coords.float()
+
+        # 影像特徵融合
+        x = torch.cat([anchor_view, x], dim=1)  # batch, 6, H, W
         x = self.patch_embed(x)
 
-        target_pos = target_pos + self.masked_embed
-
-        # add time embeddings
-        time_token = self.time_embed(timestep_embedding(timesteps, self.embed_dim))
-        time_token = time_token.unsqueeze(dim=1)
-        x = x + self.pos_embed
-        B, L, D = x.shape
-
-        # ============================================================
-        # === 魔法融合：只留下絕對座標 + 雜訊 (不再加語意藍圖) ===
-        # ============================================================
-        x = target_pos + x
-
-        # add conditions
+        # 1. 加入時間特徵
+        time_token = self.time_embed(timestep_embedding(timesteps, self.embed_dim)).unsqueeze(dim=1)
         x = torch.cat((time_token, x), dim=1)
 
+        # 2. 計算 RoPE 的頻率矩陣
+        # 因為前面 concat 了一個 time_token，所以我們幫 time_token 的座標補上 (0,0) 以保持形狀對齊
+        B, L_coords, _ = pos_coords.shape
+        time_coords = torch.zeros((B, 1, 2), device=x.device, dtype=x.dtype)
+        full_coords = torch.cat([time_coords, pos_coords], dim=1)  # [B, 1+L, 2]
+
+        freqs = self.rope2d(full_coords)  # [B, 1+L, head_dim]
+
+        # 3. 進入帶有 RoPE 的 Transformer Blocks
         skips = []
         for blk in self.in_blocks:
-            x = blk(x)
+            x = blk(x, freqs=freqs)
             skips.append(x)
 
-        x = self.mid_block(x)
+        x = self.mid_block(x, freqs=freqs)
 
         for blk in self.out_blocks:
-            x = blk(x, skips.pop())
+            x = blk(x, skip=skips.pop(), freqs=freqs)
 
         x = self.norm(x)
         x = self.decoder_pred(x)
-        x = x[:, -L:, :]
+
+        # 捨棄 time_token
+        x = x[:, 1:, :]
+
         x = unpatchify(x, self.in_chans)
         x = self.final_layer(x)
         return x

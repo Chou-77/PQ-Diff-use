@@ -161,30 +161,77 @@ class ImageDataset(Dataset):
         # 深度圖放在包含 'depth_maps' 名稱的資料夾
         # 如果你的資料夾名稱不同，請修改以下兩個變數：
         # =========================================================
-        rgb_folder = 'images'
-        depth_folder = 'depth_maps'
+        # rgb_folder = 'images'
+        # depth_folder = 'depth_maps'
+        #
+        # for i in range(len(image_paths)):
+        #     rgb_path = image_paths[i]
+        #
+        #     # 防呆機制：避免遞迴讀取時，把 depth_maps 裡的圖當成 RGB 讀進來
+        #     if depth_folder in rgb_path:
+        #         continue
+        #
+        #     try:
+        #         pil_image = Image.open(rgb_path)
+        #         pil_image.load()
+        #
+        #         # 推導對應的深度圖路徑 (強制副檔名為 .png，對應之前的萃取腳本)
+        #         depth_path = rgb_path.replace(rgb_folder, depth_folder)
+        #         depth_path = depth_path.rsplit('.', 1)[0] + '.png'
+        #
+        #         # 只有當「RGB 和 Depth 都存在」時，才加入訓練清單
+        #         if os.path.exists(depth_path):
+        #             self.image_paths.append(rgb_path)
+        #             self.depth_paths.append(depth_path)
+        #     except:
+        #         pass
+        # =========================================================
+        # 【強健版路徑對應與除錯】
+        # =========================================================
+        rgb_folder_name = 'images'
+        depth_folder_name = 'depth_maps'
+
+        success_count = 0
+        fail_count = 0
 
         for i in range(len(image_paths)):
             rgb_path = image_paths[i]
 
-            # 防呆機制：避免遞迴讀取時，把 depth_maps 裡的圖當成 RGB 讀進來
-            if depth_folder in rgb_path:
+            if depth_folder_name in rgb_path:
                 continue
 
             try:
                 pil_image = Image.open(rgb_path)
                 pil_image.load()
 
-                # 推導對應的深度圖路徑 (強制副檔名為 .png，對應之前的萃取腳本)
-                depth_path = rgb_path.replace(rgb_folder, depth_folder)
+                # 推導深度圖路徑：把最後一個 'images' 換成 'depth_maps'
+                parts = rgb_path.rsplit(rgb_folder_name, 1)
+                if len(parts) == 2:
+                    depth_path = parts[0] + depth_folder_name + parts[1]
+                else:
+                    depth_path = rgb_path.replace(rgb_folder_name, depth_folder_name)
+
+                # 強制改為 .png
                 depth_path = depth_path.rsplit('.', 1)[0] + '.png'
 
-                # 只有當「RGB 和 Depth 都存在」時，才加入訓練清單
+                # 檢查深度圖存不存在！
                 if os.path.exists(depth_path):
                     self.image_paths.append(rgb_path)
                     self.depth_paths.append(depth_path)
-            except:
+                    success_count += 1
+                else:
+                    fail_count += 1
+                    # ★ 抓漏關鍵：印出前 3 個找不到的例子 ★
+                    if fail_count <= 3:
+                        print(f"\n⚠️ 找不到深度圖！")
+                        print(f"彩色圖路徑: {rgb_path}")
+                        print(f"預期深度圖: {depth_path}\n")
+
+            except Exception as e:
                 pass
+
+        print(f"\n✅ 成功配對的 RGB-D 圖片數量: {success_count}")
+        print(f"❌ 找不到深度圖的數量: {fail_count}\n")
 
         self.labels = labels
         self.embed_dim = embed_dim

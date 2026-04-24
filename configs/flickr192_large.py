@@ -43,7 +43,7 @@ def get_config():
         name='uvit',
         img_size=24,
         patch_size=2,
-        in_chans=4,
+        in_chans=5,
         embed_dim=1024,
         depth=20,
         num_heads=16,
@@ -56,7 +56,7 @@ def get_config():
 
     config.dataset = d(
         name='flickr',
-        path='/home/lab722-3090/下載/EasyOutPainter-main/dataset/scenery_small/train/images/',
+        path='/home/lab722-3090/下載/PQDiff-main (副本)/dataset/scenery/train/images/',
         resolution=192,
         embed_dim=1024,
         grid_size=12,
